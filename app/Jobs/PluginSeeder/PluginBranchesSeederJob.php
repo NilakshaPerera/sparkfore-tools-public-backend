@@ -29,6 +29,7 @@ class PluginBranchesSeederJob extends PluginSeederJob
     {
         Cache::put($this->jobId, 'completed', 3600);
         $this->setPluginSyncCompleteStatus($this->jobId);
+        Cache::lock($this->jobId . ':branch-lock')->forceRelease();
     }
 
     /**
@@ -36,68 +37,79 @@ class PluginBranchesSeederJob extends PluginSeederJob
      */
     public function handle(): void
     {
-        Cache::put($this->jobId, 'started', 3600);
-        Cache::put($this->jobId . "-branch", 'started', 3600);
+        $lock = Cache::lock($this->jobId . ':branch-lock', 3600);
 
-        Log::info("Starting branches seeding job for repoURL: {$this->repoURL}");
-        try {
-            $validBranches = collect();
-            $giteaService = app(GiteaApiServiceInterface::class);
-            $branches = $giteaService->versionsAvailable($this->repoURL, GIT_VERSION_TYPE_BRANCH);
-            foreach ($branches as $branch) {
-                Log::info("Seeding Branch: {$branch['name']}");
-                $ref = $branch['name'] ?? null;
-                try {
-                    $content = $giteaService->getContent($this->repoURL, 'version.php', $ref);
-                    $decodedContent = base64_decode($content['content']);
-                    $requiredMoodleVersionId = $this->extractSomething($decodedContent, '$plugin->requires');
-                    if ($requiredMoodleVersionId == "") {
-                        $requiredMoodleVersionId = $this->extractSomething($decodedContent, '$module->requires');
-                    }
-                    $requiredMoodleVersion = $this->findMoodleVersion($requiredMoodleVersionId);
-                    $versionIdString = $this->extractSomething($decodedContent, '$plugin->version');
-                    $pluginComponent = $this->extractSomething($decodedContent, '$plugin->component');
-                    $versionId = preg_replace('/\D/', '', $versionIdString);
-
-                    DB::table('plugin_versions')->updateOrInsert(
-                        [
-                            'plugin_id' => $this->id,
-                            'version_type' => 1,
-                            'version_id' => $versionId,
-                            'version_name' =>  $branch['name']
-                        ],
-                        [
-
-                            'requires' => $requiredMoodleVersion,
-                            'required_version_id' => $requiredMoodleVersionId,
-                            'component' => $pluginComponent
-                        ]
-                    );
-
-                    $latestBranch = DB::table('plugin_versions')
-                        ->where('plugin_id', $this->id)
-                        ->where('version_type', 1)
-                        ->where('version_id', $versionId)
-                        ->where('version_name', $branch['name'])
-                        ->latest()
-                        ->first();
-
-                    $validBranches->add($latestBranch->id);
-
-                    Log::info("Completed seeding Branch: {$branch['name']}, Version: {$versionId} ");
-                } catch (\Throwable $e) {
-                    Log::error("Error seeding branch: {$branch['name']} | {$e->getMessage()}");
-                    report($e);
-                }
-            }
-
-            $this->deleteExtraDbBranches($validBranches);
-        } catch (\Throwable $th) {
-            Log::error("Error seeding branches for repoURL: {$this->repoURL} | {$th->getMessage()}");
+        if (!$lock->get()) {
+            Log::warning("Plugin branch sync already running (lock not acquired)", [$this->repoURL]);
+            return;
         }
 
-        Cache::put($this->jobId . "-branch", 'completed', 3600);
-        $this->setPluginSyncCompleteStatus($this->jobId);
+        try {
+            Cache::put($this->jobId, 'started', 3600);
+            Cache::put($this->jobId . "-branch", 'started', 3600);
+
+            Log::info("Starting branches seeding job for repoURL: {$this->repoURL}");
+            try {
+                $validBranches = collect();
+                $giteaService = app(GiteaApiServiceInterface::class);
+                $branches = $giteaService->versionsAvailable($this->repoURL, GIT_VERSION_TYPE_BRANCH);
+                foreach ($branches as $branch) {
+                    Log::info("Seeding Branch: {$branch['name']}");
+                    $ref = $branch['name'] ?? null;
+                    try {
+                        $content = $giteaService->getContent($this->repoURL, 'version.php', $ref);
+                        $decodedContent = base64_decode($content['content']);
+                        $requiredMoodleVersionId = $this->extractSomething($decodedContent, '$plugin->requires');
+                        if ($requiredMoodleVersionId == "") {
+                            $requiredMoodleVersionId = $this->extractSomething($decodedContent, '$module->requires');
+                        }
+                        $requiredMoodleVersion = $this->findMoodleVersion($requiredMoodleVersionId);
+                        $versionIdString = $this->extractSomething($decodedContent, '$plugin->version');
+                        $pluginComponent = $this->extractSomething($decodedContent, '$plugin->component');
+                        $versionId = preg_replace('/\D/', '', $versionIdString);
+
+                        DB::table('plugin_versions')->updateOrInsert(
+                            [
+                                'plugin_id' => $this->id,
+                                'version_type' => 1,
+                                'version_id' => $versionId,
+                                'version_name' =>  $branch['name']
+                            ],
+                            [
+
+                                'requires' => $requiredMoodleVersion,
+                                'required_version_id' => $requiredMoodleVersionId,
+                                'component' => $pluginComponent
+                            ]
+                        );
+
+                        $latestBranch = DB::table('plugin_versions')
+                            ->where('plugin_id', $this->id)
+                            ->where('version_type', 1)
+                            ->where('version_id', $versionId)
+                            ->where('version_name', $branch['name'])
+                            ->latest()
+                            ->first();
+
+                        $validBranches->add($latestBranch->id);
+
+                        Log::info("Completed seeding Branch: {$branch['name']}, Version: {$versionId} ");
+                    } catch (\Throwable $e) {
+                        Log::error("Error seeding branch: {$branch['name']} | {$e->getMessage()}");
+                        report($e);
+                    }
+                }
+
+                $this->deleteExtraDbBranches($validBranches);
+            } catch (\Throwable $th) {
+                Log::error("Error seeding branches for repoURL: {$this->repoURL} | {$th->getMessage()}");
+            }
+
+            Cache::put($this->jobId . "-branch", 'completed', 3600);
+            $this->setPluginSyncCompleteStatus($this->jobId);
+        } finally {
+            $lock->release();
+        }
     }
 
 
