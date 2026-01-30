@@ -39,7 +39,7 @@ class ProcessSyncInstallationStatus implements ShouldQueue
      */
     public function handle(): void
     {
-        //$this->syncInstalationStatus($this->id, $this->cleuraData, $this->digitaloceanData);
+        $this->syncInstalationStatus($this->id, $this->cleuraData, $this->digitaloceanData);
     }
 
 
