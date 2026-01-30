@@ -33,7 +33,7 @@ class SoftwareTableSeeder extends Seeder
     public function run(): void
     {
         // Atomic lock to prevent overlap; no "stuck" state if the process dies.
-        $lock = Cache::lock('softwareSync', 300);
+        $lock = Cache::lock('softwareSyncLock', 300);
 
         if (!$lock->get()) {
             Log::warning('Software sync already running (lock not acquired)');
@@ -41,6 +41,7 @@ class SoftwareTableSeeder extends Seeder
         }
 
         try {
+            Cache::put('softwareSync', 'running', now()->addMinutes(60));
             $this->giteaService = app(GiteaApiServiceInterface::class);
             $this->setPhpVersions();
 
@@ -294,6 +295,7 @@ class SoftwareTableSeeder extends Seeder
                 }
             }
         } finally {
+            Cache::forget('softwareSync');
             optional($lock)->release();
         }
     }
