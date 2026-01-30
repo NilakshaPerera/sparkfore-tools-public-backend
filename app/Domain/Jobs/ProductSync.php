@@ -51,6 +51,7 @@ class ProductSync implements ShouldQueue
     public function failed(Exception $exception)
     {
         Cache::put($this->jobId, 'completed', 3600);
+        Cache::lock($this->jobId . ':lock')->forceRelease();
     }
 
     /**
@@ -58,21 +59,31 @@ class ProductSync implements ShouldQueue
      */
     public function handle(): void
     {
+        $lock = Cache::lock($this->jobId . ':lock', 3600);
 
-        if (!Cache::has($this->jobId)) {
-            Cache::put($this->jobId, 'started', 3600);
+        if (!$lock->get()) {
+            Log::warning("Product sync already running (lock not acquired)", [$this->repoUrl]);
+            return;
         }
-        $this->giteaApiService = app(GiteaApiServiceInterface::class);
-        $this->productService = app(ProductServiceInterface::class);
-        if ($this->checkRepoHasPlugins()) {
-            if ($this->productModel) {
-                $this->syncPluginsInBranches();
-            } elseif ($this->repoObj) {
-                Log::info("Database product is not available for $this->repoUrl. Creating product.");
-                $this->createProductFromGit();
+
+        try {
+            if (!Cache::has($this->jobId)) {
+                Cache::put($this->jobId, 'started', 3600);
             }
+            $this->giteaApiService = app(GiteaApiServiceInterface::class);
+            $this->productService = app(ProductServiceInterface::class);
+            if ($this->checkRepoHasPlugins()) {
+                if ($this->productModel) {
+                    $this->syncPluginsInBranches();
+                } elseif ($this->repoObj) {
+                    Log::info("Database product is not available for $this->repoUrl. Creating product.");
+                    $this->createProductFromGit();
+                }
+            }
+            Cache::put($this->jobId, 'completed', 3600);
+        } finally {
+            $lock->release();
         }
-        Cache::put($this->jobId, 'completed', 3600);
     }
 
     private function syncPluginsInBranches()
